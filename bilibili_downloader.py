@@ -447,7 +447,12 @@ class App:
         self.clear_btn = ttk.Button(
             btn_frame, text="清除缓存", command=self._clear_cache
         )
-        self.clear_btn.pack(side="left")
+        self.clear_btn.pack(side="left", padx=(0, 10))
+
+        self.clear_audio_btn = ttk.Button(
+            btn_frame, text="清除音频", command=self._clear_audio
+        )
+        self.clear_audio_btn.pack(side="left")
 
         # --- Log area ---
         log_frame = ttk.LabelFrame(self.root, text="日志", padding=8)
@@ -491,6 +496,7 @@ class App:
         self.download_btn.config(state=state)
         self.cancel_btn.config(state="normal" if downloading else "disabled")
         self.clear_btn.config(state=state)
+        self.clear_audio_btn.config(state=state)
 
     def _start_download(self):
         url = self.url_var.get().strip()
@@ -666,6 +672,105 @@ class App:
             if music_deleted:
                 msg += f"，{music_deleted} 个音频文件"
             self._log(msg)
+
+        ttk.Button(
+            btn_frame, text="删除所选", command=delete_selected
+        ).pack(side="left")
+
+    def _clear_audio(self):
+        save_dir = self.path_var.get().strip()
+        music_dir = os.path.join(save_dir, "music")
+        if not os.path.isdir(music_dir):
+            messagebox.showinfo("提示", "music 目录不存在")
+            return
+
+        audio_exts = {".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".wma", ".opus"}
+        audio_files = []
+        for f in sorted(os.listdir(music_dir)):
+            full = os.path.join(music_dir, f)
+            if os.path.isfile(full) and os.path.splitext(f)[1].lower() in audio_exts:
+                audio_files.append(full)
+
+        if not audio_files:
+            messagebox.showinfo("提示", "music 目录中没有音频文件")
+            return
+
+        self._show_clear_audio_dialog(audio_files)
+
+    def _show_clear_audio_dialog(self, audio_files):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("清除音频")
+        dialog.geometry("600x420")
+        dialog.resizable(True, True)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        ttk.Label(
+            dialog,
+            text=f"找到 {len(audio_files)} 个音频文件，勾选后点击删除按钮移除：",
+            wraplength=570,
+        ).pack(padx=15, pady=(15, 5))
+
+        tree_frame = ttk.Frame(dialog)
+        tree_frame.pack(fill="both", expand=True, padx=15, pady=5)
+
+        columns = ("name", "path")
+        audio_tree = ttk.Treeview(
+            tree_frame, columns=columns, show="headings", selectmode="extended"
+        )
+        audio_tree.heading("name", text="文件名")
+        audio_tree.heading("path", text="路径")
+        audio_tree.column("name", width=200, anchor="w")
+        audio_tree.column("path", width=350, anchor="w")
+
+        scrollbar = ttk.Scrollbar(
+            tree_frame, orient="vertical", command=audio_tree.yview
+        )
+        audio_tree.configure(yscrollcommand=scrollbar.set)
+        audio_tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        for fp in audio_files:
+            audio_tree.insert("", "end", values=(os.path.basename(fp), fp))
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill="x", padx=15, pady=(10, 15))
+
+        ttk.Button(
+            btn_frame, text="全选",
+            command=lambda: audio_tree.selection_set(audio_tree.get_children())
+        ).pack(side="left", padx=(0, 10))
+
+        ttk.Button(
+            btn_frame, text="取消全选",
+            command=lambda: audio_tree.selection_remove(audio_tree.get_children())
+        ).pack(side="left", padx=(0, 10))
+
+        def delete_selected():
+            selected = audio_tree.selection()
+            if not selected:
+                messagebox.showinfo("提示", "请先选择要删除的文件", parent=dialog)
+                return
+
+            count = len(selected)
+            if not messagebox.askyesno(
+                "确认删除",
+                f"确定要删除选中的 {count} 个音频文件吗？此操作不可恢复。",
+                parent=dialog,
+            ):
+                return
+
+            deleted = 0
+            for item in selected:
+                fp = audio_tree.item(item, "values")[1]
+                try:
+                    os.remove(fp)
+                    audio_tree.delete(item)
+                    deleted += 1
+                except OSError as e:
+                    messagebox.showerror("错误", f"删除失败:\n{fp}\n{e}", parent=dialog)
+
+            self._log(f">>> 清除音频: 已删除 {deleted} 个音频文件")
 
         ttk.Button(
             btn_frame, text="删除所选", command=delete_selected
