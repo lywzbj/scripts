@@ -1,0 +1,4 @@
+requests>=2.31
+easyocr>=1.7
+openai>=1.0
+jproperties>=2.1

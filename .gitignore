@@ -1,0 +1,7 @@
+nacos/
+models/
+__pycache__/
+*.pyc
+.idea/
+.vscode/
+.DS_Store
