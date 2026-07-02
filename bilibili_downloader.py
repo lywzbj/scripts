@@ -367,7 +367,12 @@ class App:
         self.cancel_btn = ttk.Button(
             btn_frame, text="取消", command=self._cancel_download, state="disabled"
         )
-        self.cancel_btn.pack(side="left")
+        self.cancel_btn.pack(side="left", padx=(0, 10))
+
+        self.clear_btn = ttk.Button(
+            btn_frame, text="清除缓存", command=self._clear_cache
+        )
+        self.clear_btn.pack(side="left")
 
         # --- Log area ---
         log_frame = ttk.LabelFrame(self.root, text="日志", padding=8)
@@ -410,6 +415,7 @@ class App:
         self.browse_btn.config(state=state)
         self.download_btn.config(state=state)
         self.cancel_btn.config(state="normal" if downloading else "disabled")
+        self.clear_btn.config(state=state)
 
     def _start_download(self):
         url = self.url_var.get().strip()
@@ -465,6 +471,107 @@ class App:
         if self.downloader:
             self.downloader.cancel()
             self._log("\n>>> 正在取消...")
+
+    def _clear_cache(self):
+        save_dir = self.path_var.get().strip()
+        if not save_dir or not os.path.isdir(save_dir):
+            messagebox.showwarning("提示", "保存路径不存在")
+            return
+
+        video_exts = {".mp4", ".flv", ".mkv", ".avi", ".webm", ".mov", ".ts", ".m4v"}
+        video_files = []
+        for f in sorted(os.listdir(save_dir)):
+            full = os.path.join(save_dir, f)
+            if os.path.isfile(full) and os.path.splitext(f)[1].lower() in video_exts:
+                video_files.append(full)
+
+        if not video_files:
+            messagebox.showinfo("提示", "当前下载目录中没有视频文件")
+            return
+
+        self._show_clear_cache_dialog(video_files)
+
+    def _show_clear_cache_dialog(self, video_files):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("清除缓存 - 视频文件")
+        dialog.geometry("600x420")
+        dialog.resizable(True, True)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # --- Top label ---
+        ttk.Label(
+            dialog,
+            text=f"找到 {len(video_files)} 个视频文件，勾选后点击删除按钮移除：",
+            wraplength=570,
+        ).pack(padx=15, pady=(15, 5))
+
+        # --- Scrollable checkbox list ---
+        tree_frame = ttk.Frame(dialog)
+        tree_frame.pack(fill="both", expand=True, padx=15, pady=5)
+
+        columns = ("name", "path")
+        self.cache_tree = ttk.Treeview(
+            tree_frame, columns=columns, show="headings", selectmode="extended"
+        )
+        self.cache_tree.heading("name", text="文件名")
+        self.cache_tree.heading("path", text="路径")
+        self.cache_tree.column("name", width=200, anchor="w")
+        self.cache_tree.column("path", width=350, anchor="w")
+
+        scrollbar = ttk.Scrollbar(
+            tree_frame, orient="vertical", command=self.cache_tree.yview
+        )
+        self.cache_tree.configure(yscrollcommand=scrollbar.set)
+        self.cache_tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        for fp in video_files:
+            self.cache_tree.insert("", "end", values=(os.path.basename(fp), fp))
+
+        # --- Bottom buttons ---
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill="x", padx=15, pady=(10, 15))
+
+        ttk.Button(
+            btn_frame, text="全选",
+            command=lambda: self.cache_tree.selection_set(self.cache_tree.get_children())
+        ).pack(side="left", padx=(0, 10))
+
+        ttk.Button(
+            btn_frame, text="取消全选",
+            command=lambda: self.cache_tree.selection_remove(self.cache_tree.get_children())
+        ).pack(side="left", padx=(0, 10))
+
+        def delete_selected():
+            selected = self.cache_tree.selection()
+            if not selected:
+                messagebox.showinfo("提示", "请先选择要删除的文件", parent=dialog)
+                return
+
+            count = len(selected)
+            if not messagebox.askyesno(
+                "确认删除",
+                f"确定要删除选中的 {count} 个视频文件吗？此操作不可恢复。",
+                parent=dialog,
+            ):
+                return
+
+            deleted = 0
+            for item in selected:
+                fp = self.cache_tree.item(item, "values")[1]
+                try:
+                    os.remove(fp)
+                    self.cache_tree.delete(item)
+                    deleted += 1
+                except OSError as e:
+                    messagebox.showerror("错误", f"删除失败:\n{fp}\n{e}", parent=dialog)
+
+            self._log(f">>> 清除缓存: 已删除 {deleted} 个视频文件")
+
+        ttk.Button(
+            btn_frame, text="删除所选", command=delete_selected
+        ).pack(side="left")
 
     def run(self):
         self.root.mainloop()
