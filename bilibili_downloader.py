@@ -529,6 +529,14 @@ class App:
         for fp in video_files:
             self.cache_tree.insert("", "end", values=(os.path.basename(fp), fp))
 
+        # --- Checkbox for music cleanup ---
+        include_music_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            dialog,
+            text="同时删除 music 目录中的同名音频文件",
+            variable=include_music_var,
+        ).pack(anchor="w", padx=15, pady=(5, 0))
+
         # --- Bottom buttons ---
         btn_frame = ttk.Frame(dialog)
         btn_frame.pack(fill="x", padx=15, pady=(10, 15))
@@ -558,16 +566,30 @@ class App:
                 return
 
             deleted = 0
+            music_deleted = 0
             for item in selected:
                 fp = self.cache_tree.item(item, "values")[1]
                 try:
                     os.remove(fp)
                     self.cache_tree.delete(item)
                     deleted += 1
+
+                    # Also remove matching audio file in music/
+                    if include_music_var.get():
+                        stem = os.path.splitext(os.path.basename(fp))[0]
+                        audio_path = os.path.join(
+                            os.path.dirname(fp), "music", f"{stem}.mp3"
+                        )
+                        if os.path.isfile(audio_path):
+                            os.remove(audio_path)
+                            music_deleted += 1
                 except OSError as e:
                     messagebox.showerror("错误", f"删除失败:\n{fp}\n{e}", parent=dialog)
 
-            self._log(f">>> 清除缓存: 已删除 {deleted} 个视频文件")
+            msg = f">>> 清除缓存: 已删除 {deleted} 个视频文件"
+            if music_deleted:
+                msg += f"，{music_deleted} 个音频文件"
+            self._log(msg)
 
         ttk.Button(
             btn_frame, text="删除所选", command=delete_selected
