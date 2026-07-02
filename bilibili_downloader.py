@@ -146,7 +146,7 @@ class BilibiliDownloader:
 
         return True
 
-    def download(self, url, save_dir, extract_audio=False):
+    def download(self, url, save_dir, extract_audio=False, audio_only=False):
         """Main download flow."""
         self._cancel = False
         self._progress(0)
@@ -185,7 +185,9 @@ class BilibiliDownloader:
             self._log(">>> 获取播放地址...")
             streams = self._get_stream_urls(bvid, cid)
 
-            if "flv_segments" in streams:
+            if audio_only:
+                self._download_audio_only(streams, filename, save_dir)
+            elif "flv_segments" in streams:
                 self._log(">>> 正在下载FLV流...")
                 video_path = os.path.join(save_dir, f"{filename}.flv")
                 segments = streams["flv_segments"]
@@ -291,6 +293,71 @@ class BilibiliDownloader:
             raise Exception(f"音频提取失败:\n{result.stderr}")
         self._log(f"    音频已保存: {audio_path}")
 
+    def _download_audio_only(self, streams, filename, save_dir):
+        """Download audio stream only and save as mp3 to music/."""
+        music_dir = os.path.join(save_dir, "music")
+        os.makedirs(music_dir, exist_ok=True)
+
+        if "flv_segments" in streams:
+            # FLV has no separate audio track — download video then extract
+            self._log(">>> 下载FLV流以提取音频...")
+            video_tmp = os.path.join(save_dir, f"{filename}.tmp.flv")
+            segments = streams["flv_segments"]
+            with open(video_tmp, "wb") as f:
+                for i, seg in enumerate(segments):
+                    if self._cancel:
+                        return
+                    seg_resp = requests.get(seg["url"], headers=HEADERS, timeout=30)
+                    f.write(seg_resp.content)
+                    self._progress(10 + 75 * ((i + 1) / len(segments)))
+            self._extract_audio(video_tmp, filename, save_dir)
+            os.remove(video_tmp)
+        elif streams.get("audio_url"):
+            # Dash mode: download audio stream directly
+            audio_tmp = os.path.join(save_dir, f"{filename}.audio.m4s")
+            self._log(">>> 下载音频流...")
+            ok = self._download_with_progress(
+                streams["audio_url"], audio_tmp,
+                "音频流", 10, 80
+            )
+            if not ok:
+                return
+
+            self._log(">>> 转换音频格式...")
+            self._progress(85)
+            audio_path = os.path.join(music_dir, f"{filename}.mp3")
+            self._convert_audio(audio_tmp, audio_path)
+            os.remove(audio_tmp)
+            self._log(f"    音频已保存: {audio_path}")
+        else:
+            # No separate audio — download video and extract
+            self._log(">>> 无独立音频流，下载视频以提取音频...")
+            video_tmp = os.path.join(save_dir, f"{filename}.tmp.m4s")
+            ok = self._download_with_progress(
+                streams["video_url"], video_tmp,
+                "视频流", 10, 80
+            )
+            if not ok:
+                return
+            self._extract_audio(video_tmp, filename, save_dir)
+            os.remove(video_tmp)
+
+        self._progress(95)
+
+    def _convert_audio(self, src, dst):
+        """Convert an audio stream file to mp3."""
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", src,
+            "-vn",
+            "-acodec", "libmp3lame",
+            "-q:a", "2",
+            dst,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise Exception(f"音频转换失败:\n{result.stderr}")
+
     @staticmethod
     def _sanitize_filename(name):
         """Remove characters illegal in filenames."""
@@ -307,6 +374,7 @@ class App:
         self.downloader = None
         self.download_thread = None
         self.extract_audio_var = tk.BooleanVar(value=False)
+        self.audio_only_var = tk.BooleanVar(value=False)
 
         self._build_ui()
 
@@ -341,6 +409,13 @@ class App:
             variable=self.extract_audio_var,
         )
         self.extract_audio_cb.pack(anchor="w", pady=(8, 0))
+
+        self.audio_only_cb = ttk.Checkbutton(
+            path_frame,
+            text="仅下载音频到 music 目录（跳过视频）",
+            variable=self.audio_only_var,
+        )
+        self.audio_only_cb.pack(anchor="w", pady=(4, 0))
 
         # --- Progress bar ---
         progress_frame = ttk.Frame(self.root)
@@ -446,15 +521,16 @@ class App:
         )
 
         extract_audio = self.extract_audio_var.get()
+        audio_only = self.audio_only_var.get()
 
         self.download_thread = threading.Thread(
-            target=self._download_task, args=(url, save_dir, extract_audio), daemon=True
+            target=self._download_task, args=(url, save_dir, extract_audio, audio_only), daemon=True
         )
         self.download_thread.start()
 
-    def _download_task(self, url, save_dir, extract_audio):
+    def _download_task(self, url, save_dir, extract_audio, audio_only):
         try:
-            self.downloader.download(url, save_dir, extract_audio=extract_audio)
+            self.downloader.download(url, save_dir, extract_audio=extract_audio, audio_only=audio_only)
         except Exception as e:
             self._log(f"\n[错误] {e}")
         finally:
