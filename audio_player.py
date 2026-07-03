@@ -4,12 +4,14 @@ import json
 import os
 import random
 import signal
+import sqlite3
 import subprocess
 import threading
 import time
 
 AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".wma", ".opus"}
 PLAYLISTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "playlists.json")
+DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "playlist.db")
 
 
 class AudioPlayer:
@@ -18,6 +20,8 @@ class AudioPlayer:
         self._paused = False
         self._current_file = None
         self._play_start_time = 0
+        self._accumulated_elapsed = 0
+        self._duration_cache = {}
         self.on_track_end = on_track_end
         self._monitor_thread = None
 
@@ -33,11 +37,39 @@ class AudioPlayer:
     def current_file(self):
         return self._current_file
 
+    @property
+    def elapsed(self):
+        if self._play_start_time > 0:
+            return self._accumulated_elapsed + (time.time() - self._play_start_time)
+        return self._accumulated_elapsed
+
+    def _get_duration(self, filepath):
+        if filepath in self._duration_cache:
+            return self._duration_cache[filepath]
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", filepath],
+                capture_output=True, text=True, timeout=10,
+            )
+            dur = float(result.stdout.strip())
+        except (ValueError, subprocess.TimeoutExpired, FileNotFoundError):
+            dur = 0
+        self._duration_cache[filepath] = dur
+        return dur
+
+    @property
+    def duration(self):
+        if self._current_file:
+            return self._get_duration(self._current_file)
+        return 0
+
     def play(self, filepath):
         self.stop()
         self._current_file = filepath
         self._paused = False
         self._play_start_time = time.time()
+        self._accumulated_elapsed = 0
         proc = subprocess.Popen(
             ["afplay", filepath],
             stdout=subprocess.DEVNULL,
@@ -59,6 +91,8 @@ class AudioPlayer:
     def pause(self):
         if self._proc and self._proc.poll() is None:
             self._paused = True
+            self._accumulated_elapsed += time.time() - self._play_start_time
+            self._play_start_time = 0
             self._proc.send_signal(signal.SIGSTOP)
 
     def resume(self):
@@ -85,6 +119,7 @@ class AudioPlayer:
         self._paused = False
         self._current_file = None
         self._play_start_time = 0
+        self._accumulated_elapsed = 0
 
 
 class AudioPlayerApp:
@@ -100,8 +135,11 @@ class AudioPlayerApp:
         self._play_mode = tk.StringVar(value="列表循环")
         self._random_played = set()  # indices played in current random cycle
 
+        self._init_db()
+
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
+        self._load_playlist_from_db()
         self._poll_state()
 
     def _build_ui(self):
@@ -112,6 +150,20 @@ class AudioPlayerApp:
         self.track_var = tk.StringVar(value="未在播放")
         ttk.Label(now_frame, textvariable=self.track_var, font=("", 12)).pack(
             anchor="w"
+        )
+
+        # --- Progress ---
+        progress_frame = ttk.Frame(now_frame)
+        progress_frame.pack(fill="x", pady=(8, 0))
+
+        self.progress_bar = ttk.Progressbar(
+            progress_frame, mode="determinate", maximum=1000
+        )
+        self.progress_bar.pack(fill="x")
+
+        self.time_var = tk.StringVar(value="00:00 / 00:00")
+        ttk.Label(progress_frame, textvariable=self.time_var, anchor="e").pack(
+            fill="x", pady=(2, 0)
         )
 
         # --- Controls ---
@@ -178,6 +230,12 @@ class AudioPlayerApp:
         ttk.Button(pl_btn_frame, text="移除所选", command=self._remove_selected).pack(
             side="left", padx=(0, 10)
         )
+        ttk.Button(pl_btn_frame, text="上移", command=self._move_up).pack(
+            side="left", padx=(0, 5)
+        )
+        ttk.Button(pl_btn_frame, text="下移", command=self._move_down).pack(
+            side="left", padx=(0, 10)
+        )
         ttk.Button(pl_btn_frame, text="清空列表", command=self._clear_playlist).pack(
             side="left"
         )
@@ -188,14 +246,40 @@ class AudioPlayerApp:
         self.root.after(0, self._auto_advance)
 
     def _poll_state(self):
-        """Periodically update button states."""
+        """Periodically update button states and progress."""
         if self.player.is_paused:
             self.play_btn.config(text="继续")
         elif self.player.is_playing:
             self.play_btn.config(text="暂停")
         else:
             self.play_btn.config(text="播放")
+
+        self._update_progress()
         self.root.after(300, self._poll_state)
+
+    def _update_progress(self):
+        dur = self.player.duration
+        el = self.player.elapsed
+
+        if dur > 0 and self.player.is_playing:
+            pct = min(el / dur * 1000, 1000)
+            self.progress_bar["value"] = pct
+            self.time_var.set(
+                f"{self._fmt_time(el)} / {self._fmt_time(dur)}"
+            )
+        elif self.player.is_paused:
+            self.time_var.set(
+                f"{self._fmt_time(el)} / {self._fmt_time(dur)} (已暂停)"
+            )
+        else:
+            self.progress_bar["value"] = 0
+            self.time_var.set("00:00 / 00:00")
+
+    @staticmethod
+    def _fmt_time(seconds):
+        m = int(seconds) // 60
+        s = int(seconds) % 60
+        return f"{m:02d}:{s:02d}"
 
     def _refresh_display(self):
         idx = self._current_index
@@ -247,6 +331,7 @@ class AudioPlayerApp:
         self.player.stop()
         self._current_index = -1
         self._random_played.clear()
+        self._update_progress()
         self._refresh_display()
         self._refresh_listbox()
 
@@ -298,6 +383,83 @@ class AudioPlayerApp:
         if 0 <= self._current_index < len(self.playlist):
             self._random_played.add(self._current_index)
 
+    # --- Database ---
+
+    def _init_db(self):
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS playlist ("
+                "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "  filepath TEXT NOT NULL UNIQUE,"
+                "  sort_order INTEGER NOT NULL"
+                ")"
+            )
+            conn.commit()
+
+    def _load_playlist_from_db(self):
+        self.playlist.clear()
+        with sqlite3.connect(DB_FILE) as conn:
+            rows = conn.execute(
+                "SELECT filepath FROM playlist ORDER BY sort_order"
+            ).fetchall()
+        for (fp,) in rows:
+            if os.path.isfile(fp):
+                self.playlist.append(fp)
+            else:
+                self._db_delete(fp)
+        self._refresh_listbox()
+        self._refresh_display()
+
+    def _db_insert(self, filepath):
+        with sqlite3.connect(DB_FILE) as conn:
+            max_order = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) FROM playlist"
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT OR IGNORE INTO playlist (filepath, sort_order) VALUES (?, ?)",
+                (filepath, max_order + 1),
+            )
+            conn.commit()
+
+    def _db_delete(self, filepath):
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute("DELETE FROM playlist WHERE filepath = ?", (filepath,))
+            conn.commit()
+
+    def _db_clear(self):
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute("DELETE FROM playlist")
+            conn.commit()
+
+    def _db_swap_order(self, fp_a, fp_b):
+        with sqlite3.connect(DB_FILE) as conn:
+            row_a = conn.execute(
+                "SELECT sort_order FROM playlist WHERE filepath = ?", (fp_a,)
+            ).fetchone()
+            row_b = conn.execute(
+                "SELECT sort_order FROM playlist WHERE filepath = ?", (fp_b,)
+            ).fetchone()
+            if row_a and row_b:
+                conn.execute(
+                    "UPDATE playlist SET sort_order = ? WHERE filepath = ?",
+                    (row_b[0], fp_a),
+                )
+                conn.execute(
+                    "UPDATE playlist SET sort_order = ? WHERE filepath = ?",
+                    (row_a[0], fp_b),
+                )
+                conn.commit()
+
+    def _db_replace_all(self, filepaths):
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute("DELETE FROM playlist")
+            for i, fp in enumerate(filepaths):
+                conn.execute(
+                    "INSERT INTO playlist (filepath, sort_order) VALUES (?, ?)",
+                    (fp, i),
+                )
+            conn.commit()
+
     # --- Playlist management ---
 
     def _add_songs(self):
@@ -311,6 +473,7 @@ class AudioPlayerApp:
         for p in paths:
             if p not in self.playlist:
                 self.playlist.append(p)
+                self._db_insert(p)
         if paths:
             self._refresh_listbox()
             self._refresh_display()
@@ -320,19 +483,22 @@ class AudioPlayerApp:
         if not sel:
             return
 
-        # Determine if the currently playing track is being removed
         playing_removed = self._current_index in sel and self.player.is_playing
-
         if playing_removed:
             self.player.stop()
 
+        removed_fps = []
         for i in reversed(sel):
+            removed_fps.append(self.playlist[i])
             del self.playlist[i]
             if i < self._current_index:
                 self._current_index -= 1
 
         if playing_removed:
             self._current_index = -1
+
+        for fp in removed_fps:
+            self._db_delete(fp)
 
         self._refresh_listbox()
         self._refresh_display()
@@ -344,8 +510,39 @@ class AudioPlayerApp:
         self._current_index = -1
         self.playlist.clear()
         self._random_played.clear()
+        self._db_clear()
         self._refresh_listbox()
         self._refresh_display()
+
+    def _move_up(self):
+        sel = self.playlist_box.curselection()
+        if not sel or len(self.playlist) < 2:
+            return
+        i = sel[0]
+        if i <= 0:
+            return
+        self._swap_tracks(i, i - 1)
+
+    def _move_down(self):
+        sel = self.playlist_box.curselection()
+        if not sel or len(self.playlist) < 2:
+            return
+        i = sel[0]
+        if i >= len(self.playlist) - 1:
+            return
+        self._swap_tracks(i, i + 1)
+
+    def _swap_tracks(self, i, j):
+        fp_a, fp_b = self.playlist[i], self.playlist[j]
+        self.playlist[i], self.playlist[j] = self.playlist[j], self.playlist[i]
+        self._db_swap_order(fp_a, fp_b)
+        if self._current_index == i:
+            self._current_index = j
+        elif self._current_index == j:
+            self._current_index = i
+        self._refresh_listbox()
+        self.playlist_box.selection_set(j)
+        self.playlist_box.see(j)
 
     # --- Playlist file management ---
 
@@ -501,9 +698,8 @@ class AudioPlayerApp:
         name = tree.item(sel[0], "values")[0]
         self.player.stop()
         self._current_index = -1
-        self.playlist = list(data[name])
-        # Filter out non-existent files
-        self.playlist = [p for p in self.playlist if os.path.isfile(p)]
+        self.playlist = [p for p in data[name] if os.path.isfile(p)]
+        self._db_replace_all(self.playlist)
         self._refresh_listbox()
         self._refresh_display()
         dialog.destroy()
