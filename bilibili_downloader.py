@@ -6,6 +6,27 @@ import os
 import subprocess
 import threading
 
+
+def _find_ffmpeg():
+    """Locate the ffmpeg binary, falling back to PATH search."""
+    candidates = [
+        "/opt/homebrew/bin/ffmpeg",         # Homebrew on Apple Silicon
+        "/usr/local/bin/ffmpeg",            # Homebrew on Intel Mac / Linux
+        "/usr/bin/ffmpeg",                  # system install
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    # Last resort: rely on PATH
+    result = subprocess.run(["which", "ffmpeg"], capture_output=True, text=True)
+    if result.returncode == 0:
+        path = result.stdout.strip()
+        if path:
+            return path
+    # Give up and let subprocess report the error naturally
+    return "ffmpeg"
+
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -261,7 +282,7 @@ class BilibiliDownloader:
     def _merge(self, video_path, audio_path, output_path):
         """Merge video and audio with ffmpeg."""
         cmd = [
-            "ffmpeg", "-y",
+            _find_ffmpeg(), "-y",
             "-i", video_path,
             "-i", audio_path,
             "-c:v", "copy",
@@ -281,7 +302,7 @@ class BilibiliDownloader:
         self._log(f">>> 提取音频到 music/{filename}.mp3 ...")
 
         cmd = [
-            "ffmpeg", "-y",
+            _find_ffmpeg(), "-y",
             "-i", video_path,
             "-vn",
             "-acodec", "libmp3lame",
@@ -347,7 +368,7 @@ class BilibiliDownloader:
     def _convert_audio(self, src, dst):
         """Convert an audio stream file to mp3."""
         cmd = [
-            "ffmpeg", "-y",
+            _find_ffmpeg(), "-y",
             "-i", src,
             "-vn",
             "-acodec", "libmp3lame",
